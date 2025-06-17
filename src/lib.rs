@@ -21,6 +21,14 @@ impl LinearLayer {
         
         Self { weights, bias }
     }
+
+    /// Create a deterministic linear layer for testing
+    pub fn new_test_layer(input_size: usize) -> Self {
+        // Create deterministic weights and bias for consistent testing
+        let weights = Array1::from_iter((0..input_size).map(|i| ((i % 5) + 1) as i16));
+        let bias = 10;
+        Self { weights, bias }
+    }
     
     /// Evaluate the linear layer in plaintext
     pub fn eval_plaintext(&self, input: &Array1<i16>) -> i16 {

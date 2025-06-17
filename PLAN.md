@@ -15,13 +15,13 @@ A living document tracking the **minimum-viable** steps to get GPT-2 inference r
 
 ## 1. Milestones (Quick Wins)
 
-| ID     | Deliverable                                                                                                                                               | What we learn                                                                             |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **M1** | Skeleton workspace with two binaries: `garbler` and `evaluator` that open a socket and exchange a "ping" message.                                         | Proves channel plumbing across machines. ✅                                               |
-| **M2** | Plaintext baseline: load tiny GPT-2 (Hugging-Face `ggml` or `rust-bert`), run single-token inference & time it.                                           | Establishes latency/throughput baseline. ✅                                               |
-| **M3** | GC demo with _one_ linear layer (matmul + bias) lifted from CNN example in `garbled-neural-network-experiments`. Input vector length = hidden size (768). | Validates encode/ reveal workflow, obtains first GC timing. ✅                            |
-| **M4** | Integrate local tokenizer + embedding (runs in the Garbler) and stream encoded embedding to Evaluator where same linear layer runs in GC.                 | Converts CNN code-path to transformer shape; measures extra overhead of network transfer. |
-| **M5** | Side-by-side benchmark harness printing: plaintext µs, GC µs, cipher size, OT count.                                                                      | Hard numbers for first blogpost / discussion.                                             |
+| ID     | Deliverable                                                                                                                                                         | What we learn                                                                       |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| **M1** | Skeleton workspace with two binaries: `garbler` and `evaluator` that open a socket and exchange a "ping" message.                                                   | Proves channel plumbing across machines. ✅                                         |
+| **M2** | Plaintext baseline **in Python**: PyTorch script loads GPT-2, runs single-token inference, **exports quantised (Q8.8) weights/embeddings** to JSON/NumPy for Rust.  | Establishes latency/throughput baseline **and produces re-usable weight dumps**. ✅ |
+| **M3** | GC demo with _one_ linear layer (matmul + bias) lifted from CNN example in `garbled-neural-network-experiments`. Input vector length = hidden size (768).           | Validates encode/reveal workflow, obtains first GC timing. ✅                       |
+| **M4** | Integrate local tokenizer + embedding (Python tokeniser ➜ Rust garbler) and stream **Python-quantised embeddings** to Evaluator where same linear layer runs in GC. | Measures extra overhead of network transfer; demonstrates Rust↔Python hand-off.     |
+| **M5** | Side-by-side benchmark harness printing: plaintext µs, GC µs, cipher size, OT count.                                                                                | Hard numbers for first report / discussion.                                         |
 
 These are intentionally shallow; once M5 is solid we iterate toward full transformer blocks (see full roadmap in `docs/roadmap.md`).
 
@@ -32,7 +32,8 @@ These are intentionally shallow; once M5 is solid we iterate toward full transfo
 - **Channel**: both binaries accept `--listen <addr:port>` OR `--connect <addr:port>`. Rookie-friendly: garbler listens, evaluator connects.
 - **RNG & OT**: use default `rand_chacha` RNG; start with `dummy` OT (local testing), then swap to IKNP (`swanky_ot::iknp`). Same code signature.
 - **Linear Layer Gadget**: copy `linear_layer_gc()` from `garbled-neural-network-experiments` (it already builds a Fancy-Arithmetic matmul). Adjust modulus to 2¹⁶ and quantise inputs with scale 256.
-- **Plaintext Path**: call identical Rust function but on `i16` values without encoding.
+- **Plaintext Path (Python)**: all baseline and quantisation steps live in `plaintext_baseline.py` (PyTorch). Export helper writes `{weights.npy, bias.npy}`.
+- **GC Path (Rust)** : only secure computation lives in Rust using `fancy-garbling`; consumes the NumPy/JSON dumps produced by Python.
 
 ---
 

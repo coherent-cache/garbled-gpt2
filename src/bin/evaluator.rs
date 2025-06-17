@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 
 use fancy_garbling::twopac::semihonest::Evaluator;
 use fancy_garbling::util as numbers;
-use fancy_garbling::{FancyInput, AllWire};
+use fancy_garbling::{FancyInput, FancyReveal, AllWire};
 use ocelot::ot::AlszReceiver;
-use scuttlebutt::{AesRng, Channel};
+use scuttlebutt::{AesRng, Channel, AbstractChannel};
+
+use garbled_gpt2::{from_mod_q, LinearLayer};
 
 /// Evaluator side – connects to the garbler, waits for PING, replies with PONG.
 #[derive(Parser, Debug)]
@@ -81,9 +83,12 @@ fn handshake_as_evaluator(mut stream: TcpStream) -> Result<()> {
 
 fn participate_in_linear_layer_demo(stream: TcpStream, input_size: usize) -> Result<()> {
     println!("[evaluator] participating in linear layer demo");
-    
     let gc_start = Instant::now();
+    
+    // Create the *same* deterministic linear layer as the garbler
+    let layer = LinearLayer::new_test_layer(input_size);
     let modulus = numbers::modulus_with_width(16); // 16-bit modulus
+    
     println!("[evaluator] using modulus: {}", modulus);
     
     // Create channel and evaluator
@@ -95,27 +100,21 @@ fn participate_in_linear_layer_demo(stream: TcpStream, input_size: usize) -> Res
     let input_bundles = evaluator.crt_receive_many(input_size, modulus)?;
     println!("[evaluator] received {} encoded input values", input_bundles.len());
     
-    // The evaluator doesn't know the weights, but participates in the computation
-    // In the CNN implementation, weights would be received if they were secret
-    // For this demo, weights are public (known to both parties)
-    
-    // Since the garbler does the computation, we just wait for the result
-    // In a real implementation, the evaluator would also perform computations
-    
-    println!("[evaluator] waiting for computation to complete...");
-    
-    // The computation happens on the garbler side in this simplified demo
-    // In a full implementation, both parties would compute together
-    
+    // Evaluate the garbled circuit. Both parties must call this.
+    let gc_result_bundle = layer.eval_garbled(&mut evaluator, &input_bundles, modulus)
+        .map_err(|e| anyhow::anyhow!("Garbled circuit evaluation failed: {:?}", e))?;
+        
+    // Reveal the result to get the plaintext value
+    let modular_result_vec = evaluator.reveal_bundle(&gc_result_bundle)?;
+    let primes = numbers::factor(modulus);
+    let modular_result = numbers::crt_inv(&modular_result_vec, &primes);
+    let result = from_mod_q(modular_result, modulus);
+
     let gc_time = gc_start.elapsed();
+
+    println!("[evaluator] ✅ Milestone 3 validated!");
+    println!("[evaluator] Garbled circuit result (revealed): {}", result);
     println!("[evaluator] GC participation took {:?}", gc_time);
-    
-    // Milestone 3 completed from evaluator side!
-    println!("[evaluator] ✅ Milestone 3 completed from evaluator side");
-    println!("[evaluator] - Participated in linear layer GC computation");
-    println!("[evaluator] - Received {} input encodings", input_size);
-    println!("[evaluator] - GC time: {:?}", gc_time);
-    println!("[evaluator] - Modulus: {} (16-bit)", modulus);
     
     Ok(())
 }
