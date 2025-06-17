@@ -1,0 +1,27 @@
+# Ignore the neural network experiments repo
+garbled-neural-network-experiments/
+
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db 
