@@ -1,0 +1,221 @@
+# Garbled GPT-2 Project Rules
+
+You are an expert in Rust systems programming, Python machine learning, and cryptographic computing, specifically garbled circuits and secure multi-party computation (MPC).
+
+## Project Context
+
+This project implements GPT-2 inference using garbled circuits via the `fancy-garbling` Rust library. The goal is to enable secure two-party computation where:
+
+- **Garbler**: Handles tokenization, embeddings locally; encodes private inputs
+- **Evaluator**: Performs transformer computations on encrypted data; runs on GPU cloud
+
+### Architecture
+
+- **Binary-only Rust crate** with `garbler` and `evaluator` binaries
+- **Socket-based communication** for LAN deployment across machines
+- **Python baseline** for performance comparison and correctness validation
+- **Modular design** following milestone-driven development (M1-M5)
+
+## Tech Stack
+
+### Core Technologies
+
+- **Rust 1.74+** with `fancy-garbling`, `clap`, `anyhow`
+- **Python 3.12+** with `torch`, `transformers`, `numpy`
+- **Garbled Circuits**: Swanky's `twopac::semihonest` protocol (BMR16)
+- **Networking**: TCP sockets with retry logic and error handling
+- **Fixed-point arithmetic**: 16-bit quantization (Q8.8 format)
+
+### Dependencies
+
+```toml
+# Rust
+fancy-garbling = "0.15"
+swanky = "0.2"
+clap = { version = "4.4", features = ["derive"] }
+anyhow = "1.0"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+
+# Python
+torch >= 2.7
+transformers >= 4.43
+numpy >= 2.0
+```
+
+## Coding Standards
+
+### Rust Guidelines
+
+- **Error Handling**: Use `anyhow::Result<T>` for applications, `thiserror` for libraries
+- **CLI**: Use `clap::Parser` with descriptive help text and sensible defaults
+- **Naming**: `snake_case` for functions/variables, `PascalCase` for types
+- **Documentation**: `///` for public APIs, `//` for implementation notes
+- **Testing**: Unit tests in same file (`#[cfg(test)]`), integration tests in `tests/`
+
+```rust
+// Preferred error handling pattern
+use anyhow::{Context, Result};
+
+fn connect_with_retry(addr: &str, retries: u32) -> Result<TcpStream> {
+    TcpStream::connect(addr)
+        .with_context(|| format!("failed to connect to {}", addr))
+}
+```
+
+### Python Guidelines
+
+- **Type Hints**: Use modern typing (`list[str]` not `List[str]`)
+- **Error Handling**: Specific exceptions, descriptive messages
+- **Imports**: Group stdlib, third-party, local (black/isort compatible)
+- **Docstrings**: Google style for functions, classes
+
+```python
+def run_gpt2_inference(text: str, model_name: str = "gpt2") -> tuple[str, float]:
+    """Run GPT-2 inference and return predicted token with timing.
+
+    Args:
+        text: Input text to process
+        model_name: HuggingFace model identifier
+
+    Returns:
+        Tuple of (predicted_token, inference_time_ms)
+    """
+```
+
+### Garbled Circuit Patterns
+
+- **Wire Management**: Use `encode_many_wires()` for batch operations
+- **Modulus Selection**: Prefer 2^16 for 16-bit fixed-point arithmetic
+- **Protocol Flow**: Garbler encodes → sends → Evaluator receives → computes → reveals
+- **Resource Cleanup**: Explicit cleanup of temporary circuit artifacts
+
+```rust
+// Typical garbler encoding pattern
+let (zero_wires, encoded_wires) = garbler.encode_many_wires(&vals, &moduli)?;
+for wire in &encoded_wires {
+    garbler.send_wire(wire)?;
+}
+```
+
+## Project Structure
+
+```
+garbled-gpt2/
+├── src/bin/           # Binary targets
+│   ├── garbler.rs     # Socket listener, input encoding
+│   └── evaluator.rs   # Socket connector, circuit evaluation
+├── src/lib.rs         # Common utilities (if needed)
+├── tests/             # Integration tests
+├── plaintext_baseline.py  # Performance reference
+├── PLAN.md  # Milestone tracking
+└── .cursorrules       # This file
+```
+
+## Development Workflow
+
+### Milestones (Current: M1-M2 ✅)
+
+- **M1**: Socket communication scaffold ✅
+- **M2**: Plaintext GPT-2 baseline ✅
+- **M3**: Single linear layer in GC (current)
+- **M4**: Local tokenizer + embedding pipeline
+- **M5**: Benchmark harness with metrics
+
+### Command Patterns
+
+```bash
+# Development
+cargo check                     # Fast compilation check
+cargo test                      # Run all tests
+python plaintext_baseline.py    # Baseline inference
+
+# Deployment
+cargo build --release           # Optimized binaries
+./target/release/garbler --listen 0.0.0.0:7000
+./target/release/evaluator --connect garbler.host:7000
+```
+
+### Git Workflow
+
+- **Commits**: Descriptive, milestone-focused messages
+- **Branches**: `main` for stable, feature branches for development
+- **Ignore**: `.gitignore` excludes `garbled-neural-network-experiments/`, build artifacts
+
+## Security Considerations
+
+### Semi-Honest Assumptions
+
+- Parties follow protocol but may observe intermediate values
+- No protection against malicious adversaries (future enhancement)
+- Wire labels must be properly protected during transmission
+
+### Best Practices
+
+- **Input Validation**: Sanitize all network inputs, validate moduli ranges
+- **Resource Limits**: Bound circuit size, memory usage, computation time
+- **Error Information**: Avoid leaking sensitive data in error messages
+- **Network Security**: Consider TLS for production deployment
+
+## Performance Guidelines
+
+### Optimization Targets
+
+- **Baseline**: ~906ms plaintext inference (reference)
+- **Goal**: <3x slowdown for garbled computation
+- **Memory**: Efficient wire management, avoid large intermediate buffers
+- **Network**: Minimize round trips, batch wire transfers
+
+### Profiling
+
+- Use `cargo flamegraph` for Rust performance analysis
+- `cProfile` for Python bottleneck identification
+- Monitor OT protocol overhead and wire transfer bandwidth
+
+## Common Patterns
+
+### Error Handling
+
+```rust
+// Graceful degradation with context
+match some_operation() {
+    Ok(result) => result,
+    Err(e) => {
+        eprintln!("Operation failed: {:#}", e);
+        return Err(e.into());
+    }
+}
+```
+
+### Logging
+
+```rust
+// Structured logging with party identification
+println!("[{}] {}", if is_garbler { "garbler" } else { "evaluator" }, message);
+```
+
+### Testing
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_linear_layer_gc_vs_plaintext() {
+        // Compare GC output with plaintext reference
+        let plaintext_result = linear_layer_plaintext(&input, &weights);
+        let gc_result = linear_layer_gc(&input, &weights);
+        assert_eq!(plaintext_result, gc_result);
+    }
+}
+```
+
+## Notes
+
+- **Documentation**: Reference fancy-garbling docs at https://galoisinc.github.io/swanky/fancy_garbling/
+- **Examples**: Study `garbled-neural-network-experiments/` for CNN patterns (READ-ONLY)
+- **Updates**: Maintain `PLAN.md` as milestones progress
+- **Performance**: Always compare against plaintext baseline for validation
+
+Focus on incremental progress, thorough testing, and clear documentation. Each milestone should be a working, measurable improvement over the previous state.

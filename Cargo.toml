@@ -8,6 +8,13 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
+# Garbled circuit dependencies
+fancy-garbling = { git = "https://github.com/GaloisInc/swanky.git", branch = "dev" }
+scuttlebutt = { git = "https://github.com/GaloisInc/swanky.git", branch = "dev" }
+ocelot = { git = "https://github.com/GaloisInc/swanky.git", branch = "dev" }
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+ndarray = "0.15"
 
 [[bin]]
 name = "garbler"

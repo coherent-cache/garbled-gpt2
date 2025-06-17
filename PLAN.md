@@ -1,4 +1,4 @@
-# Garbled-GPT-2 • Quick-Win Plan
+# Garbled-GPT-2 • Implementation Plan
 
 A living document tracking the **minimum-viable** steps to get GPT-2 inference running under Fancy-Garbling and to compare it against ordinary plaintext evaluation.
 
@@ -17,9 +17,9 @@ A living document tracking the **minimum-viable** steps to get GPT-2 inference r
 
 | ID     | Deliverable                                                                                                                                               | What we learn                                                                             |
 | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **M1** | Skeleton workspace with two binaries: `garbler` and `evaluator` that open a socket and exchange a "ping" message.                                         | Proves channel plumbing across machines.                                                  |
-| **M2** | Plaintext baseline: load tiny GPT-2 (Hugging-Face `ggml` or `rust-bert`), run single-token inference & time it.                                           | Establishes latency/throughput baseline.                                                  |
-| **M3** | GC demo with _one_ linear layer (matmul + bias) lifted from CNN example in `garbled-neural-network-experiments`. Input vector length = hidden size (768). | Validates encode/ reveal workflow, obtains first GC timing.                               |
+| **M1** | Skeleton workspace with two binaries: `garbler` and `evaluator` that open a socket and exchange a "ping" message.                                         | Proves channel plumbing across machines. ✅                                               |
+| **M2** | Plaintext baseline: load tiny GPT-2 (Hugging-Face `ggml` or `rust-bert`), run single-token inference & time it.                                           | Establishes latency/throughput baseline. ✅                                               |
+| **M3** | GC demo with _one_ linear layer (matmul + bias) lifted from CNN example in `garbled-neural-network-experiments`. Input vector length = hidden size (768). | Validates encode/ reveal workflow, obtains first GC timing. ✅                            |
 | **M4** | Integrate local tokenizer + embedding (runs in the Garbler) and stream encoded embedding to Evaluator where same linear layer runs in GC.                 | Converts CNN code-path to transformer shape; measures extra overhead of network transfer. |
 | **M5** | Side-by-side benchmark harness printing: plaintext µs, GC µs, cipher size, OT count.                                                                      | Hard numbers for first blogpost / discussion.                                             |
 
