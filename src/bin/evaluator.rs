@@ -8,7 +8,7 @@ use fancy_garbling::twopac::semihonest::Evaluator;
 use fancy_garbling::util as numbers;
 use fancy_garbling::{FancyInput, FancyReveal, AllWire};
 use ocelot::ot::AlszReceiver;
-use scuttlebutt::{AesRng, Channel, AbstractChannel};
+use scuttlebutt::{AesRng, Channel};
 
 use garbled_gpt2::{from_mod_q, LinearLayer};
 

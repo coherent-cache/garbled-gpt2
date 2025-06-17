@@ -114,26 +114,26 @@ garbled-gpt2/
 
 ## Development Workflow
 
-### Milestones (Current: M1-M2 ✅)
+### Milestones (Current: **M3 complete – working on M4**)
 
 - **M1**: Socket communication scaffold ✅
-- **M2**: Plaintext GPT-2 baseline ✅
-- **M3**: Single linear layer in GC (current)
-- **M4**: Local tokenizer + embedding pipeline
-- **M5**: Benchmark harness with metrics
+- **M2**: Python plaintext + quantisation baseline ✅ _(`plaintext_baseline.py` now dumps Q8.8 weights/embeddings for Rust)_
+- **M3**: Single linear layer evaluated in GC, outputs validated vs plaintext ✅
+- **M4**: Integrate tokenizer + embedding (Python) ➜ stream quantised embeddings to Rust garbler ⏳ _(in-progress)_
+- **M5**: Benchmark harness & metrics 📋
 
 ### Command Patterns
 
 ```bash
-# Development
-cargo check                     # Fast compilation check
-cargo test                      # Run all tests
-python plaintext_baseline.py    # Baseline inference
+# 0 . Build
+cargo build --release           # Optimised Rust binaries
 
-# Deployment
-cargo build --release           # Optimized binaries
-./target/release/garbler --listen 0.0.0.0:7000
-./target/release/evaluator --connect garbler.host:7000
+# 1 . Produce /update quantised weights (Python)
+python plaintext_baseline.py --dump-weights         # writes weights.npy / bias.npy
+
+# 2 . Garbled run (two terminals / machines)
+./target/release/garbler   --listen 0.0.0.0:7000  # Rust – encodes & sends
+./target/release/evaluator --connect garbler:7000  # Rust – computes & reveals
 ```
 
 ### Git Workflow

@@ -4,12 +4,14 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::Parser;
 use ndarray::Array1;
+use std::process::Command;
+use ndarray_npy::read_npy;
 
 use fancy_garbling::twopac::semihonest::Garbler;
 use fancy_garbling::util as numbers;
 use fancy_garbling::{FancyInput, FancyReveal, AllWire};
 use ocelot::ot::AlszSender;
-use scuttlebutt::{AesRng, Channel, AbstractChannel};
+use scuttlebutt::{AesRng, Channel};
 
 use garbled_gpt2::{LinearLayer, to_mod_q};
 
@@ -21,13 +23,44 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:7000")]
     listen: String,
 
-    /// Input vector size (simulating GPT-2 hidden size)
-    #[arg(long, default_value_t = 768)]
-    input_size: usize,
+    /// Input vector size if loading from file directly
+    #[arg(long)]
+    input_size: Option<usize>,
+
+    /// Plaintext to tokenize & embed via Python helper
+    #[arg(long)]
+    text: Option<String>,
+
+    /// Path to embedding file (.npy) produced by Python helper
+    #[arg(long, default_value = "embedding.npy")]
+    embedding: String,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // if text provided, call python helper
+    if let Some(t) = &args.text {
+        let status = Command::new("python")
+            .args([
+                "plaintext_baseline.py",
+                "--dump-embedding",
+                "--text",
+                t,
+                "--out",
+                &args.embedding,
+            ])
+            .status()
+            .context("failed to run python helper")?;
+        if !status.success() {
+            anyhow::bail!("python helper failed");
+        }
+    }
+
+    // Load embedding
+    let embedding_arr: Array1<i16> = read_npy(&args.embedding).context("read embedding npy")?;
+    let embedding = embedding_arr.to_vec();
+
+    // proceed to open listener and pass embedding data
     let listener = TcpListener::bind(&args.listen)
         .with_context(|| format!("failed to bind listener on {}", args.listen))?;
     println!("[garbler] listening on {}", args.listen);
@@ -41,7 +74,7 @@ fn main() -> Result<()> {
     println!("[garbler] handshake completed");
 
     // Now run the linear layer demo
-    run_linear_layer_demo(stream, args.input_size)?;
+    run_linear_layer_demo(stream, Array1::from(embedding))?;
 
     Ok(())
 }
@@ -63,15 +96,14 @@ fn handshake_as_garbler(mut stream: TcpStream) -> Result<()> {
     }
 }
 
-fn run_linear_layer_demo(stream: TcpStream, input_size: usize) -> Result<()> {
+fn run_linear_layer_demo(stream: TcpStream, embedding: Array1<i16>) -> Result<()> {
+    let input_size = embedding.len();
     println!("[garbler] starting linear layer demo with input size {}", input_size);
     
     let layer = LinearLayer::new_test_layer(input_size);
     println!("[garbler] created deterministic test linear layer");
     
-    let input_data: Array1<i16> = Array1::from_iter(
-        (0..input_size).map(|i| ((i % 10) + 1) as i16)
-    );
+    let input_data = embedding;
     
     let plaintext_start = Instant::now();
     let plaintext_result = layer.eval_plaintext(&input_data);

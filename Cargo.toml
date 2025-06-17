@@ -15,6 +15,7 @@ ocelot = { git = "https://github.com/GaloisInc/swanky.git", branch = "dev" }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 ndarray = "0.15"
+ndarray-npy = "0.8"
 
 [[bin]]
 name = "garbler"
