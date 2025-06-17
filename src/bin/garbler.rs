@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use ndarray::Array1;
 use std::process::Command;
-use ndarray_npy::read_npy;
+use byteorder::{LittleEndian, WriteBytesExt};
 
 use fancy_garbling::twopac::semihonest::Garbler;
 use fancy_garbling::util as numbers;
@@ -43,7 +43,7 @@ fn main() -> Result<()> {
         let status = Command::new("python")
             .args([
                 "plaintext_baseline.py",
-                "--dump-embedding",
+                "--dump-embeddings",
                 "--text",
                 t,
                 "--out",
@@ -56,9 +56,18 @@ fn main() -> Result<()> {
         }
     }
 
-    // Load embedding
-    let embedding_arr: Array1<i16> = read_npy(&args.embedding).context("read embedding npy")?;
-    let embedding = embedding_arr.to_vec();
+    // Support both 1-D (single token) and 2-D (multi-token) embeddings
+    let embedding_path = std::path::Path::new(&args.embedding);
+    // Attempt 2-D; if it fails, fall back to 1-D
+    let embedding_vec: Vec<i16> = match ndarray_npy::read_npy::<_, ndarray::Array2<i16>>(embedding_path) {
+        Ok(arr2) => arr2.into_raw_vec(),
+        Err(_) => {
+            let arr1: Array1<i16> = ndarray_npy::read_npy(embedding_path)?;
+            arr1.to_vec()
+        }
+    };
+
+    let embedding = embedding_vec;
 
     // proceed to open listener and pass embedding data
     let listener = TcpListener::bind(&args.listen)
@@ -72,6 +81,13 @@ fn main() -> Result<()> {
     // First do the handshake
     handshake_as_garbler(stream.try_clone()?)?;
     println!("[garbler] handshake completed");
+
+    // Send the embedding length (u32 little-endian) so the evaluator knows how many wires to expect
+    {
+        let mut len_writer = stream.try_clone()?;
+        len_writer.write_u32::<LittleEndian>(embedding.len() as u32)?;
+        len_writer.flush()?;
+    }
 
     // Now run the linear layer demo
     run_linear_layer_demo(stream, Array1::from(embedding))?;
@@ -97,10 +113,9 @@ fn handshake_as_garbler(mut stream: TcpStream) -> Result<()> {
 }
 
 fn run_linear_layer_demo(stream: TcpStream, embedding: Array1<i16>) -> Result<()> {
-    let input_size = embedding.len();
-    println!("[garbler] starting linear layer demo with input size {}", input_size);
+    println!("[garbler] starting linear layer demo with input size {}", embedding.len());
     
-    let layer = LinearLayer::new_test_layer(input_size);
+    let layer = LinearLayer::new_test_layer(embedding.len());
     println!("[garbler] created deterministic test linear layer");
     
     let input_data = embedding;

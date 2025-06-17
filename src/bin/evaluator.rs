@@ -3,6 +3,7 @@ use clap::Parser;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
+use byteorder::{LittleEndian, ReadBytesExt};
 
 use fancy_garbling::twopac::semihonest::Evaluator;
 use fancy_garbling::util as numbers;
@@ -27,10 +28,6 @@ struct Args {
     /// Delay between retries in milliseconds
     #[arg(long, default_value_t = 500)]
     retry_delay_ms: u64,
-
-    /// Input vector size (simulating GPT-2 hidden size)
-    #[arg(long, default_value_t = 768)]
-    input_size: usize,
 }
 
 fn main() -> Result<()> {
@@ -43,7 +40,7 @@ fn main() -> Result<()> {
     println!("[evaluator] handshake completed");
 
     // Now participate in the linear layer demo
-    participate_in_linear_layer_demo(stream, args.input_size)?;
+    participate_in_linear_layer_demo(stream)?;
 
     Ok(())
 }
@@ -81,12 +78,16 @@ fn handshake_as_evaluator(mut stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
-fn participate_in_linear_layer_demo(stream: TcpStream, input_size: usize) -> Result<()> {
+fn participate_in_linear_layer_demo(mut stream: TcpStream) -> Result<()> {
     println!("[evaluator] participating in linear layer demo");
     let gc_start = Instant::now();
     
+    // Read the input length (u32 little-endian) sent by the garbler
+    let input_len = stream.read_u32::<LittleEndian>()? as usize;
+    println!("[evaluator] expecting {} input elements", input_len);
+
     // Create the *same* deterministic linear layer as the garbler
-    let layer = LinearLayer::new_test_layer(input_size);
+    let layer = LinearLayer::new_test_layer(input_len);
     let modulus = numbers::modulus_with_width(16); // 16-bit modulus
     
     println!("[evaluator] using modulus: {}", modulus);
@@ -97,7 +98,7 @@ fn participate_in_linear_layer_demo(stream: TcpStream, input_size: usize) -> Res
     let mut evaluator = Evaluator::<_, AesRng, AlszReceiver, AllWire>::new(channel, rng)?;
     
     // Receive the encoded inputs from the garbler
-    let input_bundles = evaluator.crt_receive_many(input_size, modulus)?;
+    let input_bundles = evaluator.crt_receive_many(input_len, modulus)?;
     println!("[evaluator] received {} encoded input values", input_bundles.len());
     
     // Evaluate the garbled circuit. Both parties must call this.

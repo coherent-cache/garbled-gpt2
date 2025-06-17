@@ -1,13 +1,18 @@
-#!/usr/bin/env python3
+"""Plaintext baseline + quantisation helper.
 
-# PYTHON BASELINE & QUANTISATION HELPER
-# -------------------------------------
-# Provides two modes:
-# 1. `--baseline`              → run GPT-2 forward pass and print timing
-# 2. `--dump-embedding --text` → dump quantised embedding (Q8.8) to .npy for Rust
+Usage examples
+--------------
+Run timing baseline:
+    python plaintext_baseline.py --text "The quick brown fox"
 
-import time
+Dump quantised embedding (Q8.8) for the first token of a prompt:
+    python plaintext_baseline.py --dump-embedding --text "The quick brown fox" --out embedding.npy
+"""
+
+from __future__ import annotations
+
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
@@ -16,61 +21,77 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 
 def quantise_to_q88(tensor: torch.Tensor) -> np.ndarray:
-    """Quantise a float32 tensor to signed 16-bit Q8.8 fixed-point."""
-    scaled = torch.round(tensor * 256).to(torch.int16)
-    return scaled.cpu().numpy().astype(np.int16)
+    """Quantise a float32 tensor to signed-16-bit Q8.8 fixed-point."""
+    return torch.round(tensor * 256).to(torch.int16).cpu().numpy()
 
 
-def baseline_inference(
-    text: str = "The quick brown fox", model_name: str = "gpt2"
-) -> None:
-    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-    model = GPT2LMHeadModel.from_pretrained(model_name)
+def dump_embedding(text: str, output: Path | str) -> None:
+    """Save the first-token embedding (quantised) to *output* (.npy)."""
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    model = GPT2LMHeadModel.from_pretrained("gpt2")
+    model.eval()
+
+    with torch.no_grad():
+        ids = tokenizer(text, return_tensors="pt")["input_ids"]
+        emb = model.transformer.wte(ids)[0, 0]  # first token
+        np.save(output, quantise_to_q88(emb))
+
+    print(f"[python] wrote quantised embedding to {output}")
+
+
+def dump_embeddings(text: str, output: Path | str) -> None:
+    """Save quantised embeddings for *all* tokens in the prompt to *output* (.npy).
+
+    Output shape: (n_tokens, hidden_size).
+    """
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    model = GPT2LMHeadModel.from_pretrained("gpt2")
+    model.eval()
+
+    with torch.no_grad():
+        ids = tokenizer(text, return_tensors="pt")["input_ids"]
+        emb = model.transformer.wte(ids)[0]  # shape (seq_len, hidden)
+        np.save(output, quantise_to_q88(emb))
+
+    print(f"[python] wrote quantised embeddings for {emb.shape[0]} tokens to {output}")
+
+
+def run_baseline(text: str) -> None:
+    """Plaintext GPT-2 forward & log timing."""
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    model = GPT2LMHeadModel.from_pretrained("gpt2")
     model.eval()
 
     inputs = tokenizer(text, return_tensors="pt")
     start = time.time()
     with torch.no_grad():
-        outputs = model(**inputs)
-    dur_ms = (time.time() - start) * 1e3
-
-    next_id = int(outputs.logits[0, -1].argmax())
-    next_tok = tokenizer.decode([next_id])
-    print(f"[python] Baseline next token: '{next_tok.strip()}' in {dur_ms:.2f} ms")
+        _ = model(**inputs)
+    elapsed = (time.time() - start) * 1e3
+    print(f"[python] baseline inference: {elapsed:.1f} ms")
 
 
-def dump_embedding(text: str, output: str, model_name: str = "gpt2") -> None:
-    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-    model = GPT2LMHeadModel.from_pretrained(model_name)
-    model.eval()
-    with torch.no_grad():
-        ids = tokenizer(text, return_tensors="pt")["input_ids"]
-        emb = model.transformer.wte(ids)[0, 0]
-        np.save(output, quantise_to_q88(emb))
-    print(f"[python] wrote quantised embedding to {output} (shape={emb.shape})")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="GPT-2 plaintext baseline & embedding dumper"
-    )
-    parser.add_argument(
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--text", type=str, required=True, help="Prompt text")
+    p.add_argument(
         "--dump-embedding",
         action="store_true",
-        help="Dump first-token embedding to .npy",
+        help="Write Q8.8 embedding .npy and exit",
     )
-    parser.add_argument(
-        "--text", type=str, default="The quick brown fox", help="Input text"
+    p.add_argument("--out", type=Path, default=Path("embedding.npy"))
+    p.add_argument(
+        "--dump-embeddings",
+        action="store_true",
+        help="Write Q8.8 embeddings for all tokens (.npy) and exit",
     )
-    parser.add_argument(
-        "--out", type=str, default="embedding.npy", help="Output .npy filename"
-    )
-    args = parser.parse_args()
+    args = p.parse_args()
 
     if args.dump_embedding:
         dump_embedding(args.text, args.out)
+    elif args.dump_embeddings:
+        dump_embeddings(args.text, args.out)
     else:
-        baseline_inference(args.text)
+        run_baseline(args.text)
 
 
 if __name__ == "__main__":

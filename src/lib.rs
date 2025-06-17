@@ -111,7 +111,8 @@ mod tests {
     
     #[test]
     fn test_modular_conversion() {
-        let q = 65536u128; // 2^16
+        // Use a square-free 16-bit modulus accepted by fancy-garbling
+        let q: u128 = fancy_garbling::util::modulus_with_width(16);
         
         // Test positive numbers
         assert_eq!(to_mod_q(100, q), 100);
@@ -127,5 +128,41 @@ mod tests {
             let recovered = from_mod_q(modular, q);
             assert_eq!(x, recovered);
         }
+    }
+    
+    #[test]
+    fn test_linear_layer_garbled_matches_plaintext() {
+        use fancy_garbling::dummy::Dummy;
+        use fancy_garbling::FancyReveal;
+
+        // Use small layer size for the test
+        let input_size = 5;
+        let layer = LinearLayer::new_test_layer(input_size);
+
+        // Build a deterministic input vector
+        let input_vals: Vec<i16> = (0..input_size as i16).map(|i| i * 3 + 1).collect();
+        let input = Array1::from(input_vals.clone());
+
+        // Plaintext reference
+        let expected = layer.eval_plaintext(&input);
+
+        // Use a square-free 16-bit modulus accepted by fancy-garbling
+        let q: u128 = fancy_garbling::util::modulus_with_width(16);
+
+        // Build Dummy fancy object and encode inputs as CRT bundles
+        let mut dummy = Dummy::new();
+        let encoded_input: Vec<_> = input_vals
+            .iter()
+            .map(|&v| dummy.crt_encode(to_mod_q(v as i64, q), q).unwrap())
+            .collect();
+
+        // Evaluate in GC and reveal
+        let result_bundle = layer
+            .eval_garbled(&mut dummy, &encoded_input, q)
+            .expect("garbled eval failed");
+        let revealed_mod = dummy.crt_reveal(&result_bundle).unwrap();
+        let actual = from_mod_q(revealed_mod, q) as i16;
+
+        assert_eq!(expected, actual);
     }
 } 
