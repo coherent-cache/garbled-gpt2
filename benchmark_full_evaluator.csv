@@ -1,0 +1,6 @@
+role,wall_time_ms,garble_time_ms,eval_time_ms,reveal_time_ms,bytes_sent,bytes_recv,total_bytes,initial_mem_mb,peak_mem_mb,final_mem_mb,mem_delta_mb,input_size,run_id,seed
+evaluator,39.808,,0.651,0.845,4142,91152,95294,0.33,0.75,0.75,0.42,768,1,42
+evaluator,38.934,,0.616,0.523,4142,91152,95294,0.15,0.74,0.74,0.60,768,2,42
+evaluator,37.003,,0.647,1.049,4142,91152,95294,0.14,0.74,0.74,0.60,768,3,42
+evaluator,45.826,,0.724,0.885,4142,91152,95294,0.15,0.74,0.74,0.60,768,4,42
+evaluator,57.020,,0.695,0.665,4142,91152,95294,0.15,0.74,0.74,0.60,768,5,42

@@ -19,7 +19,11 @@ use fancy_garbling::{AllWire, FancyInput, FancyReveal};
 use ocelot::ot::AlszSender;
 use scuttlebutt::{AesRng, Channel, TrackChannel};
 
-use garbled_gpt2::{memory::MemoryTracker, to_mod_q, LinearLayer};
+use garbled_gpt2::{
+    csv_writer::{BenchmarkResult, CsvWriter},
+    memory::MemoryTracker,
+    to_mod_q, LinearLayer,
+};
 
 /// Garbler side – opens a listener, waits for the evaluator, then does a simple PING/PONG handshake.
 #[derive(Parser, Debug)]
@@ -32,6 +36,18 @@ struct Args {
     /// Path to embeddings file (.npy) produced by Python helper
     #[arg(long, default_value = "embedding.npy")]
     embeddings: String,
+
+    /// Path to CSV file for benchmark results
+    #[arg(long)]
+    csv: Option<String>,
+
+    /// Number of benchmark runs
+    #[arg(long, default_value_t = 1)]
+    num_runs: u32,
+
+    /// Random seed for reproducible runs
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
 }
 
 fn main() -> Result<()> {
@@ -52,30 +68,60 @@ fn main() -> Result<()> {
 
     let embedding = embedding_vec;
 
-    // proceed to open listener and pass embedding data
-    let listener = TcpListener::bind(&args.listen)
-        .with_context(|| format!("failed to bind listener on {}", args.listen))?;
-    println!("[garbler] listening on {}", args.listen);
+    // Set up CSV writer if requested
+    let csv_writer = if let Some(csv_path) = &args.csv {
+        // Generate unique filename for garbler to avoid corruption
+        let garbler_csv_path = if csv_path.ends_with(".csv") {
+            csv_path.replace(".csv", "_garbler.csv")
+        } else {
+            format!("{}_garbler.csv", csv_path)
+        };
+        let writer = CsvWriter::new(garbler_csv_path);
+        writer
+            .write_header()
+            .with_context(|| "Failed to write CSV header")?;
+        Some(writer)
+    } else {
+        None
+    };
 
-    // Accept a single connection for now.
-    let (stream, addr) = listener
-        .accept()
-        .context("failed to accept incoming connection")?;
-    println!("[garbler] connection from {}", addr);
+    // Run for the specified number of runs
+    for run_id in 1..=args.num_runs {
+        println!("[garbler] === Run {}/{} ===", run_id, args.num_runs);
 
-    // First do the handshake
-    handshake_as_garbler(stream.try_clone()?)?;
-    println!("[garbler] handshake completed");
+        // Open listener for this run
+        let listener = TcpListener::bind(&args.listen)
+            .with_context(|| format!("failed to bind listener on {}", args.listen))?;
+        println!("[garbler] listening on {} (run {})", args.listen, run_id);
 
-    // Send the embedding length (u32 little-endian) so the evaluator knows how many wires to expect
-    {
-        let mut len_writer = stream.try_clone()?;
-        len_writer.write_u32::<LittleEndian>(embedding.len() as u32)?;
-        len_writer.flush()?;
+        // Accept a single connection for this run
+        let (stream, addr) = listener
+            .accept()
+            .context("failed to accept incoming connection")?;
+        println!("[garbler] connection from {} (run {})", addr, run_id);
+
+        // First do the handshake
+        handshake_as_garbler(stream.try_clone()?)?;
+        println!("[garbler] handshake completed (run {})", run_id);
+
+        // Send the embedding length (u32 little-endian) so the evaluator knows how many wires to expect
+        {
+            let mut len_writer = stream.try_clone()?;
+            len_writer.write_u32::<LittleEndian>(embedding.len() as u32)?;
+            len_writer.flush()?;
+        }
+
+        // Now run the linear layer demo
+        run_linear_layer_demo(
+            stream,
+            Array1::from(embedding.clone()),
+            &csv_writer,
+            run_id,
+            args.seed,
+        )?;
     }
 
-    // Now run the linear layer demo
-    run_linear_layer_demo(stream, Array1::from(embedding))?;
+    println!("[garbler] ✅ All {} runs completed", args.num_runs);
 
     Ok(())
 }
@@ -97,10 +143,17 @@ fn handshake_as_garbler(mut stream: TcpStream) -> Result<()> {
     }
 }
 
-fn run_linear_layer_demo(stream: TcpStream, embedding: Array1<i16>) -> Result<()> {
+fn run_linear_layer_demo(
+    stream: TcpStream,
+    embedding: Array1<i16>,
+    csv_writer: &Option<CsvWriter>,
+    run_id: u32,
+    seed: u64,
+) -> Result<()> {
+    let input_size = embedding.len();
     println!(
         "[garbler] starting linear layer demo with input size {}",
-        embedding.len()
+        input_size
     );
 
     // Initialize memory tracking
@@ -111,13 +164,13 @@ fn run_linear_layer_demo(stream: TcpStream, embedding: Array1<i16>) -> Result<()
         .map_err(|e| anyhow::anyhow!("Failed to read initial memory: {}", e))?;
     println!("[garbler] initial memory: {:.2} MB", initial_mem_mb);
 
-    let layer = LinearLayer::new_test_layer(embedding.len());
+    let layer = LinearLayer::new_test_layer(input_size);
     println!("[garbler] created deterministic test linear layer");
 
     let input_data = embedding;
 
     let plaintext_start = Instant::now();
-    let plaintext_result = layer.eval_plaintext(&input_data);
+    let plaintext_result = layer.eval_plaintext_scalar(&input_data);
     let plaintext_time = plaintext_start.elapsed();
 
     println!(
@@ -145,7 +198,7 @@ fn run_linear_layer_demo(stream: TcpStream, embedding: Array1<i16>) -> Result<()
 
     let eval_start = Instant::now();
     let gc_result_bundle = layer
-        .eval_garbled(&mut garbler, &input_bundles, modulus)
+        .eval_garbled_scalar(&mut garbler, &input_bundles, modulus)
         .map_err(|e| anyhow::anyhow!("Garbled circuit evaluation failed: {:?}", e))?;
     let eval_time = eval_start.elapsed();
 
@@ -188,6 +241,29 @@ fn run_linear_layer_demo(stream: TcpStream, embedding: Array1<i16>) -> Result<()
         final_mem_mb,
         final_mem_mb - initial_mem_mb
     );
+
+    // Write results to CSV if requested
+    if let Some(writer) = csv_writer {
+        let result = BenchmarkResult::new_garbler(
+            wall_time,
+            garble_time,
+            eval_time,
+            reveal_time,
+            track_channel.kilobytes_written() * 1024.0,
+            track_channel.kilobytes_read() * 1024.0,
+            initial_mem_mb,
+            peak_mem_mb,
+            final_mem_mb,
+            input_size,
+            run_id,
+            seed,
+        );
+
+        writer
+            .write_result(&result)
+            .with_context(|| "Failed to write benchmark result to CSV")?;
+        println!("[garbler] Benchmark result written to CSV");
+    }
 
     println!("[garbler] ✅ Milestone 3 completed: single linear layer in GC");
     println!("[garbler] - Plaintext result: {}", plaintext_result);

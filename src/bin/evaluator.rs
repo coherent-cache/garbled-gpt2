@@ -18,7 +18,12 @@ use fancy_garbling::{AllWire, FancyInput, FancyReveal};
 use ocelot::ot::AlszReceiver;
 use scuttlebutt::{AesRng, Channel, TrackChannel};
 
-use garbled_gpt2::{from_mod_q, memory::MemoryTracker, LinearLayer};
+use garbled_gpt2::{
+    csv_writer::{BenchmarkResult, CsvWriter},
+    from_mod_q,
+    memory::MemoryTracker,
+    LinearLayer,
+};
 
 /// Evaluator side – connects to the garbler, waits for PING, replies with PONG.
 #[derive(Parser, Debug)]
@@ -35,19 +40,56 @@ struct Args {
     /// Delay between retries in milliseconds
     #[arg(long, default_value_t = 500)]
     retry_delay_ms: u64,
+
+    /// Path to CSV file for benchmark results
+    #[arg(long)]
+    csv: Option<String>,
+
+    /// Number of benchmark runs
+    #[arg(long, default_value_t = 1)]
+    num_runs: u32,
+
+    /// Random seed for reproducible runs
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let stream = connect_with_retry(&args.connect, args.retries, args.retry_delay_ms)?;
-    println!("[evaluator] connected to {}", args.connect);
 
-    // First do the handshake
-    handshake_as_evaluator(stream.try_clone()?)?;
-    println!("[evaluator] handshake completed");
+    // Set up CSV writer if requested
+    let csv_writer = if let Some(csv_path) = &args.csv {
+        // Generate unique filename for evaluator to avoid corruption
+        let evaluator_csv_path = if csv_path.ends_with(".csv") {
+            csv_path.replace(".csv", "_evaluator.csv")
+        } else {
+            format!("{}_evaluator.csv", csv_path)
+        };
+        let writer = CsvWriter::new(evaluator_csv_path);
+        writer
+            .write_header()
+            .with_context(|| "Failed to write CSV header")?;
+        Some(writer)
+    } else {
+        None
+    };
 
-    // Now participate in the linear layer demo
-    participate_in_linear_layer_demo(stream)?;
+    // Run for the specified number of runs
+    for run_id in 1..=args.num_runs {
+        println!("[evaluator] === Run {}/{} ===", run_id, args.num_runs);
+
+        let stream = connect_with_retry(&args.connect, args.retries, args.retry_delay_ms)?;
+        println!("[evaluator] connected to {} (run {})", args.connect, run_id);
+
+        // First do the handshake
+        handshake_as_evaluator(stream.try_clone()?)?;
+        println!("[evaluator] handshake completed (run {})", run_id);
+
+        // Now participate in the linear layer demo
+        participate_in_linear_layer_demo(stream, &csv_writer, run_id, args.seed)?;
+    }
+
+    println!("[evaluator] ✅ All {} runs completed", args.num_runs);
 
     Ok(())
 }
@@ -93,7 +135,12 @@ fn handshake_as_evaluator(mut stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
-fn participate_in_linear_layer_demo(mut stream: TcpStream) -> Result<()> {
+fn participate_in_linear_layer_demo(
+    mut stream: TcpStream,
+    csv_writer: &Option<CsvWriter>,
+    run_id: u32,
+    seed: u64,
+) -> Result<()> {
     println!("[evaluator] participating in linear layer demo");
     let wall_start = Instant::now();
 
@@ -134,7 +181,7 @@ fn participate_in_linear_layer_demo(mut stream: TcpStream) -> Result<()> {
     // Evaluate the garbled circuit. Both parties must call this.
     let gc_eval_start = Instant::now();
     let gc_result_bundle = layer
-        .eval_garbled(&mut evaluator, &input_bundles, modulus)
+        .eval_garbled_scalar(&mut evaluator, &input_bundles, modulus)
         .map_err(|e| anyhow::anyhow!("Garbled circuit evaluation failed: {:?}", e))?;
     let gc_eval_time = gc_eval_start.elapsed();
 
@@ -177,6 +224,29 @@ fn participate_in_linear_layer_demo(mut stream: TcpStream) -> Result<()> {
         final_mem_mb,
         final_mem_mb - initial_mem_mb
     );
+
+    // Write results to CSV if requested
+    if let Some(writer) = csv_writer {
+        let result = BenchmarkResult::new_evaluator(
+            wall_time,
+            eval_time,
+            gc_eval_time,
+            reveal_time,
+            track_channel.kilobytes_written() * 1024.0,
+            track_channel.kilobytes_read() * 1024.0,
+            initial_mem_mb,
+            peak_mem_mb,
+            final_mem_mb,
+            input_len,
+            run_id,
+            seed,
+        );
+
+        writer
+            .write_result(&result)
+            .with_context(|| "Failed to write benchmark result to CSV")?;
+        println!("[evaluator] Benchmark result written to CSV");
+    }
 
     Ok(())
 }
