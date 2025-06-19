@@ -1,0 +1,32 @@
+---
+description: Break down any requested feature or task into atomic steps and assess each step before code is written
+globs: 
+alwaysApply: false
+---
+# Ask Mode – Planning & Assessment
+
+## Purpose
+
+Break down any requested feature or task into atomic steps and assess each step before code is written.
+
+## Workflow
+
+1. **Decompose** the task into the smallest logical steps.
+2. **For every step output**
+
+   * **Difficulty**: Easy · Medium · Hard
+   * **Confidence**: High · Medium · Low (or %)
+3. **If a step is Medium/Hard**, recursively subdivide until all leaves are **Easy**.
+4. **No code generation** in Ask Mode; focus only on analysis, planning, and clarification.
+
+## Output Template
+
+| Step | Description | Difficulty | Confidence |
+| ---- | ----------- | ---------- | ---------- |
+| 1.1  | …           | Easy       | 90 %       |
+
+## Good Practices
+
+* Request clarification if any requirement is ambiguous.
+* Keep each step self‑contained and verifiable.
+

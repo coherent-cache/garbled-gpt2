@@ -1,24 +1,31 @@
 use anyhow::{Context, Result};
+use byteorder::{LittleEndian, ReadBytesExt};
 use clap::Parser;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
-use byteorder::{LittleEndian, ReadBytesExt};
+
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 use fancy_garbling::twopac::semihonest::Evaluator;
 use fancy_garbling::util as numbers;
-use fancy_garbling::{FancyInput, FancyReveal, AllWire};
+use fancy_garbling::{AllWire, FancyInput, FancyReveal};
 use ocelot::ot::AlszReceiver;
-use scuttlebutt::{AesRng, Channel};
+use scuttlebutt::{AesRng, Channel, TrackChannel};
 
-use garbled_gpt2::{from_mod_q, LinearLayer};
+use garbled_gpt2::{from_mod_q, memory::MemoryTracker, LinearLayer};
 
 /// Evaluator side – connects to the garbler, waits for PING, replies with PONG.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Address to connect to, e.g. 127.0.0.1:7000
-    #[arg(long, default_value = "127.0.0.1:7000")]
+    /// Address to connect to, e.g. 127.0.0.1:9000
+    #[arg(long, default_value = "127.0.0.1:9000")]
     connect: String,
 
     /// Maximum connection retries
@@ -51,18 +58,26 @@ fn connect_with_retry(addr: &str, retries: u32, delay_ms: u64) -> Result<TcpStre
         match TcpStream::connect(addr) {
             Ok(stream) => return Ok(stream),
             Err(err) if attempt < retries => {
-                println!("[evaluator] connection attempt {} failed: {}", attempt + 1, err);
+                println!(
+                    "[evaluator] connection attempt {} failed: {}",
+                    attempt + 1,
+                    err
+                );
                 std::thread::sleep(Duration::from_millis(delay_ms));
                 attempt += 1;
             }
-            Err(err) => return Err(err).with_context(|| format!("failed to connect to {} after {} retries", addr, retries)),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("failed to connect to {} after {} retries", addr, retries)
+                })
+            }
         }
     }
 }
 
 fn handshake_as_evaluator(mut stream: TcpStream) -> Result<()> {
     println!("[evaluator] waiting for PING handshake from garbler …");
-    
+
     // Wait for PING
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -80,8 +95,16 @@ fn handshake_as_evaluator(mut stream: TcpStream) -> Result<()> {
 
 fn participate_in_linear_layer_demo(mut stream: TcpStream) -> Result<()> {
     println!("[evaluator] participating in linear layer demo");
-    let gc_start = Instant::now();
-    
+    let wall_start = Instant::now();
+
+    // Initialize memory tracking
+    let memory_tracker = MemoryTracker::new()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize memory tracker: {}", e))?;
+    let initial_mem_mb = memory_tracker
+        .current_allocated_mb()
+        .map_err(|e| anyhow::anyhow!("Failed to read initial memory: {}", e))?;
+    println!("[evaluator] initial memory: {:.2} MB", initial_mem_mb);
+
     // Read the input length (u32 little-endian) sent by the garbler
     let input_len = stream.read_u32::<LittleEndian>()? as usize;
     println!("[evaluator] expecting {} input elements", input_len);
@@ -89,33 +112,71 @@ fn participate_in_linear_layer_demo(mut stream: TcpStream) -> Result<()> {
     // Create the *same* deterministic linear layer as the garbler
     let layer = LinearLayer::new_test_layer(input_len);
     let modulus = numbers::modulus_with_width(16); // 16-bit modulus
-    
+
     println!("[evaluator] using modulus: {}", modulus);
-    
+
     // Create channel and evaluator
     let channel = Channel::new(stream.try_clone()?, stream);
+    let track_channel = TrackChannel::new(channel);
     let rng = AesRng::new();
-    let mut evaluator = Evaluator::<_, AesRng, AlszReceiver, AllWire>::new(channel, rng)?;
-    
+
+    let eval_start = Instant::now();
+    let mut evaluator =
+        Evaluator::<_, AesRng, AlszReceiver, AllWire>::new(track_channel.clone(), rng)?;
+
     // Receive the encoded inputs from the garbler
     let input_bundles = evaluator.crt_receive_many(input_len, modulus)?;
-    println!("[evaluator] received {} encoded input values", input_bundles.len());
-    
+    println!(
+        "[evaluator] received {} encoded input values",
+        input_bundles.len()
+    );
+
     // Evaluate the garbled circuit. Both parties must call this.
-    let gc_result_bundle = layer.eval_garbled(&mut evaluator, &input_bundles, modulus)
+    let gc_eval_start = Instant::now();
+    let gc_result_bundle = layer
+        .eval_garbled(&mut evaluator, &input_bundles, modulus)
         .map_err(|e| anyhow::anyhow!("Garbled circuit evaluation failed: {:?}", e))?;
-        
+    let gc_eval_time = gc_eval_start.elapsed();
+
     // Reveal the result to get the plaintext value
+    let reveal_start = Instant::now();
     let modular_result_vec = evaluator.reveal_bundle(&gc_result_bundle)?;
     let primes = numbers::factor(modulus);
     let modular_result = numbers::crt_inv(&modular_result_vec, &primes);
     let result = from_mod_q(modular_result, modulus);
+    let reveal_time = reveal_start.elapsed();
 
-    let gc_time = gc_start.elapsed();
+    let eval_time = eval_start.elapsed();
+    let wall_time = wall_start.elapsed();
 
     println!("[evaluator] ✅ Milestone 3 validated!");
     println!("[evaluator] Garbled circuit result (revealed): {}", result);
-    println!("[evaluator] GC participation took {:?}", gc_time);
-    
+    println!("[evaluator] GC participation took {:?}", gc_eval_time);
+
+    // Emit all timing measurements, byte counters, and memory usage (Steps 2.1 & 2.2)
+    let peak_mem_mb = memory_tracker
+        .peak_allocated_mb()
+        .map_err(|e| anyhow::anyhow!("Failed to read peak memory: {}", e))?;
+    let final_mem_mb = memory_tracker
+        .current_allocated_mb()
+        .map_err(|e| anyhow::anyhow!("Failed to read final memory: {}", e))?;
+
+    println!(
+        "[evaluator] wall_time={:?} eval_time={:?} gc_eval_time={:?} reveal_time={:?}",
+        wall_time, eval_time, gc_eval_time, reveal_time
+    );
+    println!(
+        "[evaluator] bytes_sent={:.0} bytes_recv={:.0} total_bytes={:.0}",
+        track_channel.kilobytes_written() * 1024.0,
+        track_channel.kilobytes_read() * 1024.0,
+        track_channel.total_kilobytes() * 1024.0
+    );
+    println!(
+        "[evaluator] peak_mem={:.2} MB final_mem={:.2} MB mem_delta={:.2} MB",
+        peak_mem_mb,
+        final_mem_mb,
+        final_mem_mb - initial_mem_mb
+    );
+
     Ok(())
 }

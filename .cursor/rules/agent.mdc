@@ -1,0 +1,33 @@
+---
+description: Execute only the steps pre‑vetted as **Easy/Low‑difficulty** in Ask Mode
+globs: 
+alwaysApply: false
+---
+# Agent Mode – Controlled Execution
+
+## Purpose
+
+Execute only the steps pre‑vetted as **Easy/Low‑difficulty** in Ask Mode.
+
+## Execution Rules
+
+1. **Targeted action**
+
+   * Execute **only** the step IDs explicitly referenced by the user (e.g. `ACT 3.2`).
+2. **Announce**
+
+   * Before coding, print `⏩ Executing step <ID>`.
+3. **Safety**
+
+   * Ignore all other planned steps unless re‑authorised.
+   * If uncertainty arises, switch back to Ask Mode.
+4. **Coding Standards**
+
+   * Python ≥ 3.10, type‑annotated, PEP‑8.
+   * CUDA kernels in `.cu`, exposed via pybind11.
+   * Centralised config for model size, batch size, κ.
+
+## Commit Protocol
+
+* Commit one logical change per step.
+* Include benchmark or test artifacts relevant to the step.

@@ -1,71 +1,54 @@
+use anyhow::{Context, Result};
+use byteorder::{LittleEndian, WriteBytesExt};
+use clap::Parser;
+use ndarray::Array1;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Instant;
-use anyhow::{Context, Result};
-use clap::Parser;
-use ndarray::Array1;
-use std::process::Command;
-use byteorder::{LittleEndian, WriteBytesExt};
+
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 use fancy_garbling::twopac::semihonest::Garbler;
 use fancy_garbling::util as numbers;
-use fancy_garbling::{FancyInput, FancyReveal, AllWire};
+use fancy_garbling::{AllWire, FancyInput, FancyReveal};
 use ocelot::ot::AlszSender;
-use scuttlebutt::{AesRng, Channel};
+use scuttlebutt::{AesRng, Channel, TrackChannel};
 
-use garbled_gpt2::{LinearLayer, to_mod_q};
+use garbled_gpt2::{memory::MemoryTracker, to_mod_q, LinearLayer};
 
 /// Garbler side – opens a listener, waits for the evaluator, then does a simple PING/PONG handshake.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Address to listen on, e.g. 0.0.0.0:7000
-    #[arg(long, default_value = "0.0.0.0:7000")]
+    /// Address to listen on, e.g. 0.0.0.0:9000
+    #[arg(long, default_value = "0.0.0.0:9000")]
     listen: String,
 
-    /// Input vector size if loading from file directly
-    #[arg(long)]
-    input_size: Option<usize>,
-
-    /// Plaintext to tokenize & embed via Python helper
-    #[arg(long)]
-    text: Option<String>,
-
-    /// Path to embedding file (.npy) produced by Python helper
+    /// Path to embeddings file (.npy) produced by Python helper
     #[arg(long, default_value = "embedding.npy")]
-    embedding: String,
+    embeddings: String,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    // if text provided, call python helper
-    if let Some(t) = &args.text {
-        let status = Command::new("python")
-            .args([
-                "plaintext_baseline.py",
-                "--dump-embeddings",
-                "--text",
-                t,
-                "--out",
-                &args.embedding,
-            ])
-            .status()
-            .context("failed to run python helper")?;
-        if !status.success() {
-            anyhow::bail!("python helper failed");
-        }
-    }
 
-    // Support both 1-D (single token) and 2-D (multi-token) embeddings
-    let embedding_path = std::path::Path::new(&args.embedding);
+    // Load embeddings from `.npy` file without invoking Python (produced externally)
+    // Support both 1-D (single token) and 2-D (multi-token) embeddings.
+    let embedding_path = std::path::Path::new(&args.embeddings);
     // Attempt 2-D; if it fails, fall back to 1-D
-    let embedding_vec: Vec<i16> = match ndarray_npy::read_npy::<_, ndarray::Array2<i16>>(embedding_path) {
-        Ok(arr2) => arr2.into_raw_vec(),
-        Err(_) => {
-            let arr1: Array1<i16> = ndarray_npy::read_npy(embedding_path)?;
-            arr1.to_vec()
-        }
-    };
+    let embedding_vec: Vec<i16> =
+        match ndarray_npy::read_npy::<_, ndarray::Array2<i16>>(embedding_path) {
+            Ok(arr2) => arr2.into_raw_vec(),
+            Err(_) => {
+                let arr1: Array1<i16> = ndarray_npy::read_npy(embedding_path)?;
+                arr1.to_vec()
+            }
+        };
 
     let embedding = embedding_vec;
 
@@ -75,7 +58,9 @@ fn main() -> Result<()> {
     println!("[garbler] listening on {}", args.listen);
 
     // Accept a single connection for now.
-    let (stream, addr) = listener.accept().context("failed to accept incoming connection")?;
+    let (stream, addr) = listener
+        .accept()
+        .context("failed to accept incoming connection")?;
     println!("[garbler] connection from {}", addr);
 
     // First do the handshake
@@ -113,50 +98,100 @@ fn handshake_as_garbler(mut stream: TcpStream) -> Result<()> {
 }
 
 fn run_linear_layer_demo(stream: TcpStream, embedding: Array1<i16>) -> Result<()> {
-    println!("[garbler] starting linear layer demo with input size {}", embedding.len());
-    
+    println!(
+        "[garbler] starting linear layer demo with input size {}",
+        embedding.len()
+    );
+
+    // Initialize memory tracking
+    let memory_tracker = MemoryTracker::new()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize memory tracker: {}", e))?;
+    let initial_mem_mb = memory_tracker
+        .current_allocated_mb()
+        .map_err(|e| anyhow::anyhow!("Failed to read initial memory: {}", e))?;
+    println!("[garbler] initial memory: {:.2} MB", initial_mem_mb);
+
     let layer = LinearLayer::new_test_layer(embedding.len());
     println!("[garbler] created deterministic test linear layer");
-    
+
     let input_data = embedding;
-    
+
     let plaintext_start = Instant::now();
     let plaintext_result = layer.eval_plaintext(&input_data);
     let plaintext_time = plaintext_start.elapsed();
-    
-    println!("[garbler] plaintext evaluation: {} (took {:?})", 
-             plaintext_result, plaintext_time);
-    
-    let gc_start = Instant::now();
+
+    println!(
+        "[garbler] plaintext evaluation: {} (took {:?})",
+        plaintext_result, plaintext_time
+    );
+
+    let wall_start = Instant::now();
     let modulus = numbers::modulus_with_width(16);
     println!("[garbler] using modulus: {}", modulus);
-    
+
     let channel = Channel::new(stream.try_clone()?, stream);
+    let track_channel = TrackChannel::new(channel);
     let rng = AesRng::new();
-    let mut garbler = Garbler::<_, AesRng, AlszSender, AllWire>::new(channel, rng)?;
-    
-    let input_bundles: Vec<_> = input_data.iter()
+
+    let garble_start = Instant::now();
+    let mut garbler = Garbler::<_, AesRng, AlszSender, AllWire>::new(track_channel.clone(), rng)?;
+
+    let input_bundles: Vec<_> = input_data
+        .iter()
         .map(|&x| garbler.crt_encode(to_mod_q(x as i64, modulus), modulus))
         .collect::<Result<Vec<_>, _>>()?;
-    
-    println!("[garbler] encoded {} input values", input_bundles.len());
-    
-    let gc_result_bundle = layer.eval_garbled(&mut garbler, &input_bundles, modulus)
-        .map_err(|e| anyhow::anyhow!("Garbled circuit evaluation failed: {:?}", e))?;
-    
-    // Participate in the reveal protocol. This sends the garbler's half of the decoding info.
-    garbler.reveal_bundle(&gc_result_bundle)?;
-    
-    println!("[garbler] garbled circuit evaluation and reveal completed");
-    let gc_time = gc_start.elapsed();
 
-    println!("[garbler] GC evaluation took {:?}", gc_time);
-    println!("[garbler] slowdown factor: {:.2}x", 
-             gc_time.as_nanos() as f64 / plaintext_time.as_nanos() as f64);
-    
+    println!("[garbler] encoded {} input values", input_bundles.len());
+
+    let eval_start = Instant::now();
+    let gc_result_bundle = layer
+        .eval_garbled(&mut garbler, &input_bundles, modulus)
+        .map_err(|e| anyhow::anyhow!("Garbled circuit evaluation failed: {:?}", e))?;
+    let eval_time = eval_start.elapsed();
+
+    // Participate in the reveal protocol. This sends the garbler's half of the decoding info.
+    let reveal_start = Instant::now();
+    garbler.reveal_bundle(&gc_result_bundle)?;
+    let reveal_time = reveal_start.elapsed();
+
+    println!("[garbler] garbled circuit evaluation and reveal completed");
+    let garble_time = garble_start.elapsed();
+
+    println!("[garbler] GC evaluation took {:?}", eval_time);
+    println!(
+        "[garbler] slowdown factor: {:.2}x",
+        eval_time.as_nanos() as f64 / plaintext_time.as_nanos() as f64
+    );
+
+    // Emit all timing measurements, byte counters, and memory usage (Steps 2.1 & 2.2)
+    let wall_time = wall_start.elapsed();
+    let peak_mem_mb = memory_tracker
+        .peak_allocated_mb()
+        .map_err(|e| anyhow::anyhow!("Failed to read peak memory: {}", e))?;
+    let final_mem_mb = memory_tracker
+        .current_allocated_mb()
+        .map_err(|e| anyhow::anyhow!("Failed to read final memory: {}", e))?;
+
+    println!(
+        "[garbler] wall_time={:?} garble_time={:?} eval_time={:?} reveal_time={:?}",
+        wall_time, garble_time, eval_time, reveal_time
+    );
+    println!(
+        "[garbler] bytes_sent={:.0} bytes_recv={:.0} total_bytes={:.0}",
+        track_channel.kilobytes_written() * 1024.0,
+        track_channel.kilobytes_read() * 1024.0,
+        track_channel.total_kilobytes() * 1024.0
+    );
+    println!(
+        "[garbler] peak_mem={:.2} MB final_mem={:.2} MB mem_delta={:.2} MB",
+        peak_mem_mb,
+        final_mem_mb,
+        final_mem_mb - initial_mem_mb
+    );
+
     println!("[garbler] ✅ Milestone 3 completed: single linear layer in GC");
     println!("[garbler] - Plaintext result: {}", plaintext_result);
     println!("[garbler] - Garbler is confident the evaluator will reveal the same result.");
-    
+
     Ok(())
 }
